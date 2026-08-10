@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/timewarp-dev/timewarp/internal/collector"
 	"github.com/timewarp-dev/timewarp/internal/graph"
@@ -54,8 +55,10 @@ func main() {
 func serve(store protocol.EventStore) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", ":7777", "listen address")
+	bufferEvents := fs.Int("buffer-events", 1024, "maximum queued events")
+	flushInterval := fs.Duration("flush-interval", 25*time.Millisecond, "maximum batching delay")
 	fs.Parse(os.Args[2:])
-	c := collector.New(store, 256, 0)
+	c := collector.New(store, *bufferEvents, *flushInterval)
 	defer c.Close()
 	log.Printf("timewarp listening on %s", *addr)
 	log.Fatal(http.ListenAndServe(*addr, c.Routes()))

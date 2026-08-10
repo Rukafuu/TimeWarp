@@ -40,3 +40,7 @@ contacts the captured upstream.
 5. Demo services and end-to-end fixture.
 6. After the slice is stable: gRPC ingestion, OpenTelemetry bridge, failure
    injection, execution diff, and alternative stores.
+
+Steps 1 through 5 are implemented. The end-to-end fixture runs an instrumented
+checkout against a failing payment service, reconstructs the resulting causal
+graph, shuts down the original dependency, and verifies recorded-only replay.
