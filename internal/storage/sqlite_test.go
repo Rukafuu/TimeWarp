@@ -30,3 +30,23 @@ func TestSQLiteRoundTripAndDuplicate(t *testing.T) {
 		t.Fatalf("traces=%v err=%v", traces, err)
 	}
 }
+
+func TestSQLiteBatchRollsBackWhenAnyEventIsInvalid(t *testing.T) {
+	s, err := OpenSQLite(filepath.Join(t.TempDir(), "rollback.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	valid := protocol.Event{EventID: "valid", TraceID: "atomic", Service: "gateway", Type: protocol.Custom, Timestamp: 1}
+	invalid := protocol.Event{EventID: "invalid", TraceID: "atomic", Service: "gateway", Type: protocol.Custom}
+	if err := s.SaveBatch(context.Background(), []protocol.Event{valid, invalid}); err == nil {
+		t.Fatal("SaveBatch accepted an invalid event")
+	}
+	events, err := s.GetTrace(context.Background(), "atomic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("batch was partially persisted: %#v", events)
+	}
+}
