@@ -115,6 +115,18 @@ See [the universal agent interface](docs/agent-interface.md) for tools, scopes,
 client setup, audit behavior, and the reversibility boundary. The reusable
 agent workflow is versioned at `skills/debug-with-timewarp`.
 
+## Browser and render diagnostics
+
+The dependency-free [`@timewarp/web`](sdk/web) SDK records global JavaScript
+errors, unhandled promises, explicit render failures, route changes, fetch
+timing/status, Web Vitals, and long tasks. Diagnostic mode can capture a
+bounded structural DOM snapshot only after temporary runtime consent; text,
+form values, cookies, storage, headers, bodies, and screenshots are excluded.
+
+DOM evidence is classified as sensitive payload by the MCP interface and
+requires `payload:read`. See the [Web SDK guide](docs/web-sdk.md) for modes,
+privacy boundaries, batching, and render-integration examples.
+
 For the proposed AI-agent gateway deployment model, see the
 [Ghostwire architecture and readiness plan](docs/ghostwire.md). Ghostwire is
 currently a design proposal, not a runnable gateway.

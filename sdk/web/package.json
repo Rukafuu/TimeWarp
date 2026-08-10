@@ -1,0 +1,32 @@
+{
+  "name": "@timewarp/web",
+  "version": "0.1.0",
+  "description": "Privacy-first browser instrumentation for TimeWarp",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check src/index.js"
+  },
+  "keywords": [
+    "observability",
+    "tracing",
+    "browser",
+    "debugging"
+  ],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20"
+  }
+}

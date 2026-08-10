@@ -263,6 +263,10 @@ func TestDynamicGrantExpiresWithoutRestart(t *testing.T) {
 func TestTracePayloadsAreRedactedAndReadsAreAudited(t *testing.T) {
 	store := &memoryStore{events: []protocol.Event{{
 		EventID: "event-1", TraceID: "trace-1", Service: "example-api", Type: protocol.HTTPClient, Timestamp: 1,
+		Metadata: map[string]any{
+			"name": "browser.render_issue", "dom": map[string]any{"text": "private"},
+			"diagnostic": map[string]any{"html": "private nested html"},
+		},
 		HTTP: &protocol.HTTPRecord{
 			Method: "POST", URL: "https://example.test/action", StatusCode: 200,
 			RequestHeaders: map[string][]string{"Authorization": {"secret"}}, RequestBody: []byte("private request"),
@@ -281,8 +285,15 @@ func TestTracePayloadsAreRedactedAndReadsAreAudited(t *testing.T) {
 		t.Fatalf("unexpected trace output: %+v", output)
 	}
 	httpRecord := output.Events[0].HTTP
-	if httpRecord == nil || httpRecord.RequestBody != nil || httpRecord.ResponseBody != nil || httpRecord.RequestHeaders != nil || httpRecord.ResponseHeaders != nil {
+	if httpRecord == nil || httpRecord.RequestBodyB64 != "" || httpRecord.ResponseBodyB64 != "" || httpRecord.RequestHeaders != nil || httpRecord.ResponseHeaders != nil {
 		t.Fatalf("sensitive HTTP fields were not redacted: %+v", httpRecord)
+	}
+	if output.Events[0].Metadata["name"] != "browser.render_issue" || output.Events[0].Metadata["dom"] != "[redacted:payload-read-required]" {
+		t.Fatalf("sensitive diagnostic metadata was not selectively redacted: %+v", output.Events[0].Metadata)
+	}
+	nested, ok := output.Events[0].Metadata["diagnostic"].(map[string]any)
+	if !ok || nested["html"] != "[redacted:payload-read-required]" {
+		t.Fatalf("nested sensitive metadata was not redacted: %+v", output.Events[0].Metadata)
 	}
 
 	deniedPayload := callTool(t, client, "get_trace", map[string]any{"session_id": "session-2", "trace_id": "trace-1", "include_payloads": true})
@@ -296,6 +307,24 @@ func TestTracePayloadsAreRedactedAndReadsAreAudited(t *testing.T) {
 	activeScopes, ok := audit[0].Metadata["approved_scopes"].([]string)
 	if !ok || len(activeScopes) != 1 || activeScopes[0] != ScopeTraceRead {
 		t.Fatalf("audited scopes = %#v, want [%s]", audit[0].Metadata["approved_scopes"], ScopeTraceRead)
+	}
+
+	payloadClient := connectClient(t, NewServer(store, Config{
+		Actor: "tester", Scopes: ParseScopes(ScopeTraceRead + "," + ScopePayloadRead), Now: fixedNow,
+	}))
+	withPayload := callTool(t, payloadClient, "get_trace", map[string]any{
+		"session_id": "session-payload", "trace_id": "trace-1", "include_payloads": true,
+	})
+	if withPayload.IsError {
+		t.Fatalf("payload-authorized trace failed: %s", toolText(withPayload))
+	}
+	var payloadOutput TraceOutput
+	decodeStructured(t, withPayload, &payloadOutput)
+	if _, ok := payloadOutput.Events[0].Metadata["dom"].(map[string]any); !ok {
+		t.Fatalf("authorized diagnostic metadata missing: %+v", payloadOutput.Events[0].Metadata)
+	}
+	if payloadOutput.Events[0].HTTP.RequestBodyB64 != "cHJpdmF0ZSByZXF1ZXN0" || payloadOutput.Events[0].HTTP.ResponseBodyB64 != "cHJpdmF0ZSByZXNwb25zZQ==" {
+		t.Fatalf("authorized HTTP bodies were not returned as explicit base64: %+v", payloadOutput.Events[0].HTTP)
 	}
 }
 

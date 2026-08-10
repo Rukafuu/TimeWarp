@@ -2,6 +2,7 @@ package agentmcp
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"regexp"
@@ -101,9 +102,32 @@ type TraceInput struct {
 }
 
 type TraceOutput struct {
-	TraceID  string           `json:"trace_id"`
-	Events   []protocol.Event `json:"events"`
-	Redacted bool             `json:"redacted"`
+	TraceID  string       `json:"trace_id"`
+	Events   []TraceEvent `json:"events"`
+	Redacted bool         `json:"redacted"`
+}
+
+type TraceEvent struct {
+	EventID    string         `json:"event_id"`
+	TraceID    string         `json:"trace_id"`
+	ParentID   string         `json:"parent_id,omitempty"`
+	Service    string         `json:"service"`
+	Instance   string         `json:"instance,omitempty"`
+	Type       string         `json:"type"`
+	Timestamp  int64          `json:"timestamp"`
+	DurationMS int64          `json:"duration_ms,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
+	HTTP       *TraceHTTP     `json:"http,omitempty"`
+}
+
+type TraceHTTP struct {
+	Method          string              `json:"method,omitempty"`
+	URL             string              `json:"url,omitempty"`
+	StatusCode      int                 `json:"status_code,omitempty"`
+	RequestHeaders  map[string][]string `json:"request_headers,omitempty"`
+	RequestBodyB64  string              `json:"request_body_base64,omitempty"`
+	ResponseHeaders map[string][]string `json:"response_headers,omitempty"`
+	ResponseBodyB64 string              `json:"response_body_base64,omitempty"`
 }
 
 type InspectInput struct {
@@ -309,7 +333,7 @@ func (g *gateway) getTrace(ctx context.Context, _ *mcp.CallToolRequest, input Tr
 	if err := g.audit(ctx, input.SessionID, "get_trace", input.TraceID, "allowed"); err != nil {
 		return nil, TraceOutput{}, fmt.Errorf("audit trace read: %w", err)
 	}
-	return nil, TraceOutput{TraceID: input.TraceID, Events: events, Redacted: redacted}, nil
+	return nil, TraceOutput{TraceID: input.TraceID, Events: traceEvents(events), Redacted: redacted}, nil
 }
 
 func (g *gateway) inspectTrace(ctx context.Context, _ *mcp.CallToolRequest, input InspectInput) (*mcp.CallToolResult, InspectOutput, error) {
@@ -435,6 +459,7 @@ func redactPayloads(events []protocol.Event) []protocol.Event {
 	out := make([]protocol.Event, len(events))
 	for i, event := range events {
 		out[i] = event
+		out[i].Metadata = redactSensitiveMetadata(event.Metadata)
 		if event.HTTP != nil {
 			httpCopy := *event.HTTP
 			httpCopy.RequestHeaders = nil
@@ -445,6 +470,66 @@ func redactPayloads(events []protocol.Event) []protocol.Event {
 		}
 	}
 	return out
+}
+
+func traceEvents(events []protocol.Event) []TraceEvent {
+	out := make([]TraceEvent, len(events))
+	for index, event := range events {
+		out[index] = TraceEvent{
+			EventID: event.EventID, TraceID: event.TraceID, ParentID: event.ParentID,
+			Service: event.Service, Instance: event.Instance, Type: string(event.Type),
+			Timestamp: event.Timestamp, DurationMS: event.DurationMS, Metadata: event.Metadata,
+		}
+		if event.HTTP != nil {
+			out[index].HTTP = &TraceHTTP{
+				Method: event.HTTP.Method, URL: event.HTTP.URL, StatusCode: event.HTTP.StatusCode,
+				RequestHeaders: event.HTTP.RequestHeaders, ResponseHeaders: event.HTTP.ResponseHeaders,
+				RequestBodyB64:  base64.StdEncoding.EncodeToString(event.HTTP.RequestBody),
+				ResponseBodyB64: base64.StdEncoding.EncodeToString(event.HTTP.ResponseBody),
+			}
+		}
+	}
+	return out
+}
+
+func redactSensitiveMetadata(metadata map[string]any) map[string]any {
+	if metadata == nil {
+		return nil
+	}
+	redacted := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		if sensitiveMetadataKey(key) {
+			redacted[key] = "[redacted:payload-read-required]"
+			continue
+		}
+		redacted[key] = redactMetadataValue(value)
+	}
+	return redacted
+}
+
+func redactMetadataValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return redactSensitiveMetadata(typed)
+	case []any:
+		redacted := make([]any, len(typed))
+		for index, item := range typed {
+			redacted[index] = redactMetadataValue(item)
+		}
+		return redacted
+	default:
+		return value
+	}
+}
+
+func sensitiveMetadataKey(key string) bool {
+	normalized := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
+	switch normalized {
+	case "dom", "dom_snapshot", "html", "inner_html", "outer_html", "screenshot", "visual", "form_values":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateSession(sessionID string) error {

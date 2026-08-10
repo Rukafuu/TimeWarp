@@ -41,7 +41,7 @@ Other MCP hosts can use the same executable as a stdio server.
 | Scope | Permits |
 |---|---|
 | `trace:read` | Search summaries, read redacted traces, and inspect causal graphs. |
-| `payload:read` | Include captured HTTP headers and bodies when explicitly requested. |
+| `payload:read` | Include captured HTTP headers/bodies and sensitive browser diagnostic metadata such as DOM snapshots when explicitly requested. |
 | `replay:build` | Build a recorded-only replay manifest. It does not execute replay. |
 | `checkpoint:read` | List and inspect checkpoint metadata and hashes for the current session. It never returns file contents or performs reversal. |
 
@@ -72,7 +72,7 @@ environments where non-expiring process-wide scopes are intentional.
 - `get_capabilities`: show bootstrap scopes plus active grants for a session.
 - `request_consent`: create an audited request without granting access.
 - `search_traces`: search summaries by service, time, and limit.
-- `get_trace`: read events with HTTP headers and bodies redacted by default.
+- `get_trace`: read events with HTTP headers, bodies, DOM/HTML snapshots, screenshots, and form-value metadata redacted by default.
 - `inspect_trace`: reconstruct a causal graph and return diagnostics.
 - `build_replay`: return a recorded-only manifest without starting a server.
 - `list_checkpoints`: list this session's checkpoints without file contents.

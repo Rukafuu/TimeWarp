@@ -8,6 +8,7 @@ The MVP proves one vertical slice: **record -> reconstruct -> replay**.
 - `pkg/consent` owns temporary grant states, TTL semantics, and the store port.
 - `pkg/checkpoint` owns reversible checkpoint records and the store port.
 - `pkg/sdk` is the dependency-light Go instrumentation client.
+- `sdk/web` is the framework-neutral, privacy-first browser instrumentation package.
 - `internal/collector` validates HTTP ingestion and batches writes.
 - `internal/storage` implements event and consent stores with SQLite.
 - `internal/graph` deterministically reconstructs and diagnoses causal graphs.
