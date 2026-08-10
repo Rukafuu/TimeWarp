@@ -5,11 +5,16 @@ The MVP proves one vertical slice: **record -> reconstruct -> replay**.
 ## Boundaries
 
 - `pkg/protocol` owns the stable ingestion and storage model.
+- `pkg/consent` owns temporary grant states, TTL semantics, and the store port.
+- `pkg/checkpoint` owns reversible checkpoint records and the store port.
 - `pkg/sdk` is the dependency-light Go instrumentation client.
 - `internal/collector` validates HTTP ingestion and batches writes.
-- `internal/storage` implements the `EventStore` port with SQLite.
+- `internal/storage` implements event and consent stores with SQLite.
 - `internal/graph` deterministically reconstructs and diagnoses causal graphs.
 - `internal/replay` builds a safe manifest and serves recorded HTTP responses.
+- `internal/agentmcp` exposes scoped, audited, payload-minimizing MCP tools.
+- `internal/checkpointfs` captures explicit regular files and applies compensated reversals.
+- `cmd/timewarp-mcp` is the universal stdio composition root for MCP clients.
 - `cmd/timewarp` is the composition root and CLI.
 
 The core depends on the `EventStore` interface, never on SQLite. Events use

@@ -1,0 +1,11 @@
+interface:
+  display_name: "Debug with Timewarp"
+  short_description: "Investigate traces with explicit consent"
+  default_prompt: "Use $debug-with-timewarp to investigate this failure with explicit consent and reproducible evidence."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "timewarp"
+      description: "Timewarp trace inspection and recorded-only replay tools"
+      transport: "stdio"
