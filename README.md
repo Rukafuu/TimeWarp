@@ -30,3 +30,7 @@ curl -X POST http://localhost:7778 -H 'X-Timewarp-Original-URL: https://pay.test
 
 See [the MVP architecture](docs/architecture.md) for boundaries, protocol,
 safety rules, and the incremental roadmap.
+
+For the proposed AI-agent gateway deployment model, see the
+[Ghostwire architecture and readiness plan](docs/ghostwire.md). Ghostwire is
+currently a design proposal, not a runnable gateway.
