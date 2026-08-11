@@ -67,9 +67,38 @@ TIMEWARP_DB=./timewarp.db ./timewarp consent revoke <grant-id>
 `TIMEWARP_MCP_SCOPES` remains available only for operator-controlled bootstrap
 environments where non-expiring process-wide scopes are intentional.
 
+## Durable device + workspace trust
+
+For a trusted machine and project, prefer permanent trust over repeating 15m
+grants. Trust is operator-CLI only; MCP never creates it.
+
+```bash
+TIMEWARP_DB=./timewarp.db ./timewarp trust device --actor cursor
+TIMEWARP_DB=./timewarp.db ./timewarp trust workspace \
+  --workspace /absolute/project --actor cursor
+TIMEWARP_DB=./timewarp.db ./timewarp trust list
+TIMEWARP_DB=./timewarp.db ./timewarp trust revoke workspace <id>
+TIMEWARP_DB=./timewarp.db ./timewarp trust revoke device <id>
+```
+
+Defaults grant `trace:read` and `checkpoint:read` (no `payload:read`). Override
+with `--scopes`. Device identity is a stable file beside the DB
+(`.timewarp-device-id`). Workspace paths are canonicalized the same way as
+checkpoints. Effective authorization is the union of:
+
+1. bootstrap `-scopes` / `TIMEWARP_MCP_SCOPES`
+2. active temporary session grants
+3. active device+workspace trust for the MCP actor
+
+Point the MCP at the workspace so trust can match:
+
+```bash
+./timewarp-mcp -db ./timewarp.db -actor cursor -workspace /absolute/project
+```
+
 ## Tools
 
-- `get_capabilities`: show bootstrap scopes plus active grants for a session.
+- `get_capabilities`: show bootstrap scopes, active grants, and durable trust for a session.
 - `request_consent`: create an audited request without granting access.
 - `search_traces`: search summaries by service, time, and limit.
 - `get_trace`: read events with HTTP headers, bodies, DOM/HTML snapshots, screenshots, and form-value metadata redacted by default.

@@ -10,8 +10,8 @@ Use Timewarp as an evidence source. Let the MCP server enforce access; never inf
 ## Investigation workflow
 
 1. Choose one stable, non-secret `session_id` for the investigation. Do not include names, emails, tokens, or incident content.
-2. Call `get_capabilities` with the session ID before reading data. Treat only `approved_scopes` and `active_grant_ids` returned for that session as active consent.
-3. If a required scope is absent, call `request_consent` with the minimum scopes and a concise reason. Show the returned grant ID and operator action to the user. Do not run the approval command, type the confirmation, or ask another agent to do so. Stop protected calls until `get_capabilities` reports the grant as active. `request_consent` never grants access.
+2. Call `get_capabilities` with the session ID before reading data. Treat only `approved_scopes`, `active_grant_ids`, and trust fields (`trusted_device_id`, `trusted_workspace`, `trust_ids`) returned for that session as active consent. Durable device+workspace trust has no TTL; temporary grants still expire.
+3. If a required scope is absent, call `request_consent` with the minimum scopes and a concise reason. Prefer asking the operator to run `timewarp trust device` / `timewarp trust workspace` when the same machine and project will be reused, instead of repeating short TTL grants. Show the returned grant ID and operator action to the user. Do not run the approval or trust commands, type the confirmation, or ask another agent to do so. Stop protected calls until `get_capabilities` reports the grant or trust as active. `request_consent` never grants access.
 4. Start with `search_traces` and summary metadata. Narrow by service and time before loading individual traces.
 5. Call `inspect_trace` to reconstruct causality and identify orphans, cycles, ordering problems, errors, and the dominant latency path.
 6. Call `get_trace` without payloads. Prefer method, route, status, timing, event type, and sanitized metadata as evidence.

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -14,12 +15,15 @@ import (
 
 	"github.com/timewarp-dev/timewarp/internal/checkpointfs"
 	"github.com/timewarp-dev/timewarp/internal/collector"
+	"github.com/timewarp-dev/timewarp/internal/deviceid"
 	"github.com/timewarp-dev/timewarp/internal/graph"
 	"github.com/timewarp-dev/timewarp/internal/replay"
 	"github.com/timewarp-dev/timewarp/internal/storage"
+	"github.com/timewarp-dev/timewarp/internal/workspacepath"
 	"github.com/timewarp-dev/timewarp/pkg/checkpoint"
 	"github.com/timewarp-dev/timewarp/pkg/consent"
 	"github.com/timewarp-dev/timewarp/pkg/protocol"
+	"github.com/timewarp-dev/timewarp/pkg/trust"
 )
 
 func main() {
@@ -55,6 +59,8 @@ func main() {
 		replayCmd(ctx, store)
 	case "consent":
 		consentCmd(ctx, store)
+	case "trust":
+		trustCmd(ctx, store, dbPath)
 	case "checkpoint":
 		checkpointCmd(ctx, store)
 	default:
@@ -259,6 +265,175 @@ func recordConsentAudit(ctx context.Context, store protocol.EventStore, grant co
 func consentUsage() {
 	fmt.Fprintln(os.Stderr, "usage: timewarp consent <list|approve|revoke> [arguments]")
 }
+
+func trustCmd(ctx context.Context, store *storage.SQLite, dbPath string) {
+	if len(os.Args) < 3 {
+		trustUsage()
+		os.Exit(2)
+	}
+	switch os.Args[2] {
+	case "device":
+		fs := flag.NewFlagSet("trust device", flag.ExitOnError)
+		actor := fs.String("actor", env("TIMEWARP_CONSENT_OPERATOR", "cursor"), "operator actor that MCP will use")
+		label := fs.String("label", hostnameOr("local-device"), "human-readable device label")
+		scopesFlag := fs.String("scopes", strings.Join(trust.DefaultScopes, ","), "permanent scopes for this device")
+		deviceIDFile := fs.String("device-id-file", env("TIMEWARP_DEVICE_ID_FILE", deviceid.DefaultPath(dbPath)), "stable device id file")
+		fs.Parse(os.Args[3:])
+		scopes := parseTrustScopes(*scopesFlag)
+		deviceID, err := deviceid.ResolveOrCreate(*deviceIDFile)
+		fatal(err)
+		fmt.Printf("Device ID: %s\nLabel: %s\nActor: %s\nScopes: %s\nFile: %s\n", deviceID, *label, *actor, strings.Join(scopes, ","), *deviceIDFile)
+		fmt.Printf("Type %s to trust this device permanently: ", deviceID)
+		if !typedExactly(deviceID) {
+			log.Fatal("device trust cancelled")
+		}
+		now := time.Now()
+		device := trust.Device{
+			ID: deviceID, DeviceLabel: strings.TrimSpace(*label), Actor: strings.TrimSpace(*actor),
+			Scopes: scopes, Status: trust.Active, CreatedAt: now.UnixMilli(),
+		}
+		if existing, err := store.GetDevice(ctx, deviceID); err == nil && existing.Status == trust.Active {
+			log.Fatalf("device %s is already trusted; revoke it first to change scopes", deviceID)
+		} else if err != nil && !errors.Is(err, trust.ErrNotFound) {
+			fatal(err)
+		}
+		if err := store.CreateDevice(ctx, device); err != nil {
+			if errors.Is(err, trust.ErrInvalidState) {
+				log.Fatalf("device %s is already trusted; revoke it first to change scopes", deviceID)
+			}
+			fatal(err)
+		}
+		if err := recordTrustAudit(ctx, store, "device_trusted", deviceID, "", scopes, now); err != nil {
+			_, _ = store.RevokeDevice(ctx, deviceID, time.Now().UnixMilli())
+			log.Fatalf("audit device trust failed; trust revoked: %v", err)
+		}
+		fmt.Printf("trusted device %s (%s)\n", deviceID, *label)
+	case "workspace":
+		fs := flag.NewFlagSet("trust workspace", flag.ExitOnError)
+		workspace := fs.String("workspace", "", "existing workspace directory")
+		actor := fs.String("actor", env("TIMEWARP_CONSENT_OPERATOR", "cursor"), "operator actor that MCP will use")
+		scopesFlag := fs.String("scopes", strings.Join(trust.DefaultScopes, ","), "permanent scopes for this workspace (intersected with device)")
+		deviceIDFile := fs.String("device-id-file", env("TIMEWARP_DEVICE_ID_FILE", deviceid.DefaultPath(dbPath)), "stable device id file")
+		fs.Parse(os.Args[3:])
+		if strings.TrimSpace(*workspace) == "" {
+			log.Fatal("--workspace is required")
+		}
+		canonical, err := workspacepath.Canonical(*workspace)
+		fatal(err)
+		deviceID, err := deviceid.ResolveOrCreate(*deviceIDFile)
+		fatal(err)
+		device, err := store.GetDevice(ctx, deviceID)
+		if errors.Is(err, trust.ErrNotFound) || (err == nil && device.Status != trust.Active) {
+			log.Fatal(trust.ErrNoDevice)
+		}
+		fatal(err)
+		if device.Actor != strings.TrimSpace(*actor) {
+			log.Fatalf("device actor is %q, but --actor is %q", device.Actor, *actor)
+		}
+		scopes := trust.IntersectScopes(parseTrustScopes(*scopesFlag), device.Scopes)
+		if len(scopes) == 0 {
+			log.Fatal("no overlapping scopes with the trusted device")
+		}
+		fmt.Printf("Device ID: %s\nWorkspace: %s\nActor: %s\nScopes: %s\n", deviceID, canonical, *actor, strings.Join(scopes, ","))
+		fmt.Printf("Type %s to trust this workspace permanently: ", canonical)
+		if !typedExactly(canonical) {
+			log.Fatal("workspace trust cancelled")
+		}
+		id, err := trust.NewWorkspaceID()
+		fatal(err)
+		now := time.Now()
+		item := trust.Workspace{
+			ID: id, DeviceID: deviceID, Workspace: canonical, Actor: strings.TrimSpace(*actor),
+			Scopes: scopes, Status: trust.Active, CreatedAt: now.UnixMilli(),
+		}
+		fatal(store.CreateWorkspace(ctx, item))
+		if err := recordTrustAudit(ctx, store, "workspace_trusted", deviceID, id, scopes, now); err != nil {
+			_, _ = store.RevokeWorkspace(ctx, id, time.Now().UnixMilli())
+			log.Fatalf("audit workspace trust failed; trust revoked: %v", err)
+		}
+		fmt.Printf("trusted workspace %s (%s)\n", id, canonical)
+	case "list":
+		fs := flag.NewFlagSet("trust list", flag.ExitOnError)
+		statusValue := fs.String("status", "ACTIVE", "ACTIVE or REVOKED (empty for all)")
+		limit := fs.Int("limit", 50, "maximum records per list")
+		fs.Parse(os.Args[3:])
+		status := trust.Status(strings.ToUpper(strings.TrimSpace(*statusValue)))
+		if status != "" && status != trust.Active && status != trust.Revoked {
+			log.Fatal("invalid trust status")
+		}
+		devices, err := store.ListDevices(ctx, trust.ListFilter{Status: status, Limit: *limit})
+		fatal(err)
+		workspaces, err := store.ListWorkspaces(ctx, trust.ListFilter{Status: status, Limit: *limit})
+		fatal(err)
+		printJSON(map[string]any{"devices": devices, "workspaces": workspaces})
+	case "revoke":
+		if len(os.Args) < 5 {
+			log.Fatal("usage: timewarp trust revoke <device|workspace> <id>")
+		}
+		now := time.Now()
+		switch os.Args[3] {
+		case "device":
+			device, err := store.RevokeDevice(ctx, os.Args[4], now.UnixMilli())
+			fatal(err)
+			fatal(recordTrustAudit(ctx, store, "device_revoked", device.ID, "", device.Scopes, now))
+			fmt.Printf("revoked device %s (workspace trusts cascaded)\n", device.ID)
+		case "workspace":
+			item, err := store.RevokeWorkspace(ctx, os.Args[4], now.UnixMilli())
+			fatal(err)
+			fatal(recordTrustAudit(ctx, store, "workspace_revoked", item.DeviceID, item.ID, item.Scopes, now))
+			fmt.Printf("revoked workspace %s\n", item.ID)
+		default:
+			log.Fatal("usage: timewarp trust revoke <device|workspace> <id>")
+		}
+	default:
+		trustUsage()
+		os.Exit(2)
+	}
+}
+
+func parseTrustScopes(raw string) []string {
+	parts := strings.Split(raw, ",")
+	scopes := trust.NormalizeScopes(parts)
+	if len(scopes) == 0 {
+		scopes = append([]string{}, trust.DefaultScopes...)
+	}
+	allowed := map[string]bool{
+		"trace:read": true, "checkpoint:read": true, "replay:build": true, "payload:read": true,
+	}
+	filtered := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		if !allowed[scope] {
+			log.Fatalf("unsupported trust scope %q", scope)
+		}
+		filtered = append(filtered, scope)
+	}
+	return filtered
+}
+
+func recordTrustAudit(ctx context.Context, store protocol.EventStore, action, deviceID, workspaceID string, scopes []string, now time.Time) error {
+	return store.Save(ctx, protocol.Event{
+		EventID: "trust:" + action + ":" + deviceID + ":" + workspaceID + ":" + fmt.Sprint(now.UnixMilli()),
+		TraceID: "agent-session:trust", Service: "timewarp-trust", Type: protocol.Custom,
+		Timestamp: now.UnixMilli(),
+		Metadata: map[string]any{
+			"action": action, "device_id": deviceID, "workspace_id": workspaceID,
+			"scopes": scopes, "operator": env("TIMEWARP_CONSENT_OPERATOR", "local-user"),
+		},
+	})
+}
+
+func hostnameOr(fallback string) string {
+	name, err := os.Hostname()
+	if err != nil || strings.TrimSpace(name) == "" {
+		return fallback
+	}
+	return name
+}
+
+func trustUsage() {
+	fmt.Fprintln(os.Stderr, "usage: timewarp trust <device|workspace|list|revoke> [arguments]")
+}
+
 func serve(store protocol.EventStore) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", ":7777", "listen address")
@@ -314,5 +489,5 @@ func env(k, d string) string {
 	return d
 }
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: timewarp <serve|traces|inspect|graph|replay|consent|checkpoint> [arguments]")
+	fmt.Fprintln(os.Stderr, "usage: timewarp <serve|traces|inspect|graph|replay|consent|trust|checkpoint> [arguments]")
 }

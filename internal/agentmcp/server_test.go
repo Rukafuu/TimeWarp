@@ -12,6 +12,7 @@ import (
 	"github.com/timewarp-dev/timewarp/pkg/checkpoint"
 	"github.com/timewarp-dev/timewarp/pkg/consent"
 	"github.com/timewarp-dev/timewarp/pkg/protocol"
+	"github.com/timewarp-dev/timewarp/pkg/trust"
 )
 
 type memoryStore struct {
@@ -19,6 +20,8 @@ type memoryStore struct {
 	events      []protocol.Event
 	grants      map[string]consent.Grant
 	checkpoints map[string]checkpoint.Checkpoint
+	devices     map[string]trust.Device
+	workspaces  map[string]trust.Workspace
 }
 
 func (s *memoryStore) CreateCheckpoint(_ context.Context, item checkpoint.Checkpoint) error {

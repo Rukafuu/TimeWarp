@@ -19,6 +19,7 @@ import (
 	"github.com/timewarp-dev/timewarp/pkg/checkpoint"
 	"github.com/timewarp-dev/timewarp/pkg/consent"
 	"github.com/timewarp-dev/timewarp/pkg/protocol"
+	"github.com/timewarp-dev/timewarp/pkg/trust"
 )
 
 const (
@@ -40,6 +41,9 @@ type Config struct {
 	Scopes          map[string]bool
 	GrantStore      consent.Store
 	CheckpointStore checkpoint.Store
+	TrustStore      trust.Store
+	DeviceID        string
+	Workspace       string
 	Now             func() time.Time
 }
 
@@ -66,6 +70,9 @@ type CapabilitiesOutput struct {
 	AuditTracePrefix string   `json:"audit_trace_prefix"`
 	ActiveGrantIDs   []string `json:"active_grant_ids,omitempty"`
 	ExpiresAt        int64    `json:"expires_at,omitempty"`
+	TrustedDeviceID  string   `json:"trusted_device_id,omitempty"`
+	TrustedWorkspace string   `json:"trusted_workspace,omitempty"`
+	TrustIDs         []string `json:"trust_ids,omitempty"`
 }
 
 type ConsentInput struct {
@@ -190,7 +197,7 @@ func NewServer(store protocol.EventStore, cfg Config) *mcp.Server {
 	g := &gateway{store: store, cfg: cfg}
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "timewarp", Version: "0.1.0"},
-		&mcp.ServerOptions{Instructions: "Timewarp tools are local and closed-world. Only bootstrap scopes or active, unexpired grants approved outside MCP authorize access. request_consent never grants access. Require a stable session_id, keep payloads redacted unless payload:read is approved, and treat replay manifests as plans only; this server exposes no mutation or live replay tools."},
+		&mcp.ServerOptions{Instructions: "Timewarp tools are local and closed-world. Access comes from bootstrap scopes, active temporary grants, or durable device+workspace trust approved outside MCP. request_consent never grants access. Require a stable session_id, keep payloads redacted unless payload:read is approved, and treat replay manifests as plans only; this server exposes no mutation or live replay tools."},
 	)
 	readOnly := &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: boolPtr(false)}
 	mcp.AddTool(server, &mcp.Tool{Name: "get_capabilities", Title: "Get Timewarp capabilities", Description: "Show scopes explicitly approved by the operator and the server safety mode.", Annotations: readOnly}, g.capabilities)
@@ -252,10 +259,15 @@ func (g *gateway) capabilities(ctx context.Context, _ *mcp.CallToolRequest, inpu
 	if err != nil {
 		return nil, CapabilitiesOutput{}, fmt.Errorf("resolve grants: %w", err)
 	}
+	mode := "operator-approved-temporary-grants"
+	if g.cfg.TrustStore != nil && g.cfg.DeviceID != "" && g.cfg.Workspace != "" {
+		mode = "bootstrap-grants-and-workspace-trust"
+	}
 	return nil, CapabilitiesOutput{
 		Actor: g.cfg.Actor, ApprovedScopes: sortedEnabled(auth.scopes), SupportedScopes: sortedSupported(),
-		ConsentMode: "operator-approved-temporary-grants", MutationTools: false, AuditTracePrefix: "agent-session:",
+		ConsentMode: mode, MutationTools: false, AuditTracePrefix: "agent-session:",
 		ActiveGrantIDs: auth.grantIDs, ExpiresAt: auth.expiresAt,
+		TrustedDeviceID: auth.deviceID, TrustedWorkspace: auth.workspace, TrustIDs: auth.trustIDs,
 	}, nil
 }
 
@@ -386,7 +398,10 @@ func (g *gateway) authorize(ctx context.Context, sessionID, action, target strin
 type authorization struct {
 	scopes    map[string]bool
 	grantIDs  []string
+	trustIDs  []string
 	expiresAt int64
+	deviceID   string
+	workspace string
 }
 
 func (g *gateway) effectiveAuthorization(ctx context.Context, sessionID string) (authorization, error) {
@@ -396,7 +411,23 @@ func (g *gateway) effectiveAuthorization(ctx context.Context, sessionID string) 
 			auth.scopes[scope] = true
 		}
 	}
+	if g.cfg.TrustStore != nil && g.cfg.DeviceID != "" && g.cfg.Workspace != "" && g.cfg.Actor != "" {
+		resolved, err := g.cfg.TrustStore.Resolve(ctx, g.cfg.DeviceID, g.cfg.Workspace, g.cfg.Actor)
+		if err == nil {
+			auth.deviceID = resolved.DeviceID
+			auth.workspace = resolved.Workspace
+			auth.trustIDs = []string{resolved.DeviceID, resolved.WorkspaceID}
+			for _, scope := range resolved.Scopes {
+				if _, supported := supportedScopes[scope]; supported {
+					auth.scopes[scope] = true
+				}
+			}
+		} else if !errors.Is(err, trust.ErrNotFound) {
+			return authorization{}, err
+		}
+	}
 	if sessionID == "" || g.cfg.GrantStore == nil {
+		sort.Strings(auth.trustIDs)
 		return auth, nil
 	}
 	grants, err := g.cfg.GrantStore.ActiveGrants(ctx, sessionID, g.cfg.Now().UnixMilli())
@@ -415,6 +446,7 @@ func (g *gateway) effectiveAuthorization(ctx context.Context, sessionID string) 
 		}
 	}
 	sort.Strings(auth.grantIDs)
+	sort.Strings(auth.trustIDs)
 	return auth, nil
 }
 
@@ -449,7 +481,7 @@ func (g *gateway) audit(ctx context.Context, sessionID, action, target, outcome 
 		Timestamp: now.UnixMilli(),
 		Metadata: map[string]any{
 			"actor": g.cfg.Actor, "action": action, "target": target, "outcome": outcome,
-			"approved_scopes": sortedEnabled(auth.scopes), "grant_ids": auth.grantIDs,
+			"approved_scopes": sortedEnabled(auth.scopes), "grant_ids": auth.grantIDs, "trust_ids": auth.trustIDs,
 		},
 	}
 	return g.store.Save(ctx, event)

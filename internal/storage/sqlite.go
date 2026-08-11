@@ -10,6 +10,7 @@ import (
 	"github.com/timewarp-dev/timewarp/pkg/checkpoint"
 	"github.com/timewarp-dev/timewarp/pkg/consent"
 	"github.com/timewarp-dev/timewarp/pkg/protocol"
+	"github.com/timewarp-dev/timewarp/pkg/trust"
 	_ "modernc.org/sqlite"
 )
 
@@ -51,6 +52,18 @@ CREATE TABLE IF NOT EXISTS checkpoint_files (
  PRIMARY KEY(checkpoint_id,path),
  FOREIGN KEY(checkpoint_id) REFERENCES checkpoints(id) ON DELETE CASCADE);
 CREATE INDEX IF NOT EXISTS checkpoints_session_time ON checkpoints(session_id,created_at DESC);`)
+	}
+	if err == nil {
+		_, err = db.Exec(`CREATE TABLE IF NOT EXISTS trusted_devices (
+ id TEXT PRIMARY KEY, device_label TEXT NOT NULL, actor TEXT NOT NULL,
+ scopes BLOB NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL,
+ revoked_at INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS trusted_workspaces (
+ id TEXT PRIMARY KEY, device_id TEXT NOT NULL, workspace TEXT NOT NULL,
+ actor TEXT NOT NULL, scopes BLOB NOT NULL, status TEXT NOT NULL,
+ created_at INTEGER NOT NULL, revoked_at INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS trust_devices_actor_status ON trusted_devices(actor,status,created_at DESC);
+CREATE INDEX IF NOT EXISTS trust_ws_lookup ON trusted_workspaces(device_id,workspace,actor,status);`)
 	}
 	if err != nil {
 		db.Close()
@@ -309,6 +322,227 @@ func scanGrant(scanner grantScanner) (consent.Grant, error) {
 		return consent.Grant{}, fmt.Errorf("decode grant scopes: %w", err)
 	}
 	return grant, nil
+}
+
+func (s *SQLite) CreateDevice(ctx context.Context, device trust.Device) error {
+	scopes, err := json.Marshal(trust.NormalizeScopes(device.Scopes))
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var status string
+	err = tx.QueryRowContext(ctx, `SELECT status FROM trusted_devices WHERE id=?`, device.ID).Scan(&status)
+	if err == nil && status == string(trust.Active) {
+		return trust.ErrInvalidState
+	}
+	if err == nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM trusted_devices WHERE id=?`, device.ID); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO trusted_devices(id,device_label,actor,scopes,status,created_at) VALUES(?,?,?,?,?,?)`,
+		device.ID, device.DeviceLabel, device.Actor, scopes, trust.Active, device.CreatedAt); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *SQLite) GetDevice(ctx context.Context, id string) (trust.Device, error) {
+	device, err := scanDevice(s.db.QueryRowContext(ctx, `SELECT id,device_label,actor,scopes,status,created_at,revoked_at FROM trusted_devices WHERE id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return trust.Device{}, trust.ErrNotFound
+	}
+	return device, err
+}
+
+func (s *SQLite) ListDevices(ctx context.Context, filter trust.ListFilter) ([]trust.Device, error) {
+	limit := filter.Limit
+	if limit <= 0 || limit > 1000 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,device_label,actor,scopes,status,created_at,revoked_at FROM trusted_devices ORDER BY created_at DESC LIMIT 1000`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	devices := make([]trust.Device, 0, limit)
+	for rows.Next() {
+		device, err := scanDevice(rows)
+		if err != nil {
+			return nil, err
+		}
+		if filter.Status != "" && device.Status != filter.Status {
+			continue
+		}
+		devices = append(devices, device)
+		if len(devices) == limit {
+			break
+		}
+	}
+	return devices, rows.Err()
+}
+
+func (s *SQLite) RevokeDevice(ctx context.Context, id string, revokedAt int64) (trust.Device, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return trust.Device{}, err
+	}
+	defer tx.Rollback()
+	device, err := scanDevice(tx.QueryRowContext(ctx, `SELECT id,device_label,actor,scopes,status,created_at,revoked_at FROM trusted_devices WHERE id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return trust.Device{}, trust.ErrNotFound
+	}
+	if err != nil {
+		return trust.Device{}, err
+	}
+	if device.Status == trust.Revoked {
+		return trust.Device{}, trust.ErrInvalidState
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE trusted_devices SET status=?,revoked_at=? WHERE id=? AND status=?`, trust.Revoked, revokedAt, id, trust.Active)
+	if err != nil {
+		return trust.Device{}, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		return trust.Device{}, trust.ErrInvalidState
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE trusted_workspaces SET status=?,revoked_at=? WHERE device_id=? AND status=?`, trust.Revoked, revokedAt, id, trust.Active); err != nil {
+		return trust.Device{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return trust.Device{}, err
+	}
+	device.Status, device.RevokedAt = trust.Revoked, revokedAt
+	return device, nil
+}
+
+func (s *SQLite) ActiveDeviceForActor(ctx context.Context, actor string) (trust.Device, error) {
+	device, err := scanDevice(s.db.QueryRowContext(ctx, `SELECT id,device_label,actor,scopes,status,created_at,revoked_at FROM trusted_devices WHERE actor=? AND status=? ORDER BY created_at DESC LIMIT 1`, actor, trust.Active))
+	if errors.Is(err, sql.ErrNoRows) {
+		return trust.Device{}, trust.ErrNotFound
+	}
+	return device, err
+}
+
+func (s *SQLite) CreateWorkspace(ctx context.Context, item trust.Workspace) error {
+	scopes, err := json.Marshal(trust.NormalizeScopes(item.Scopes))
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO trusted_workspaces(id,device_id,workspace,actor,scopes,status,created_at) VALUES(?,?,?,?,?,?,?)`,
+		item.ID, item.DeviceID, item.Workspace, item.Actor, scopes, trust.Active, item.CreatedAt)
+	return err
+}
+
+func (s *SQLite) GetWorkspace(ctx context.Context, id string) (trust.Workspace, error) {
+	item, err := scanWorkspace(s.db.QueryRowContext(ctx, `SELECT id,device_id,workspace,actor,scopes,status,created_at,revoked_at FROM trusted_workspaces WHERE id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return trust.Workspace{}, trust.ErrNotFound
+	}
+	return item, err
+}
+
+func (s *SQLite) ListWorkspaces(ctx context.Context, filter trust.ListFilter) ([]trust.Workspace, error) {
+	limit := filter.Limit
+	if limit <= 0 || limit > 1000 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,device_id,workspace,actor,scopes,status,created_at,revoked_at FROM trusted_workspaces ORDER BY created_at DESC LIMIT 1000`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]trust.Workspace, 0, limit)
+	for rows.Next() {
+		item, err := scanWorkspace(rows)
+		if err != nil {
+			return nil, err
+		}
+		if filter.Status != "" && item.Status != filter.Status {
+			continue
+		}
+		items = append(items, item)
+		if len(items) == limit {
+			break
+		}
+	}
+	return items, rows.Err()
+}
+
+func (s *SQLite) RevokeWorkspace(ctx context.Context, id string, revokedAt int64) (trust.Workspace, error) {
+	item, err := s.GetWorkspace(ctx, id)
+	if err != nil {
+		return trust.Workspace{}, err
+	}
+	if item.Status == trust.Revoked {
+		return trust.Workspace{}, trust.ErrInvalidState
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE trusted_workspaces SET status=?,revoked_at=? WHERE id=? AND status=?`, trust.Revoked, revokedAt, id, trust.Active)
+	if err != nil {
+		return trust.Workspace{}, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		return trust.Workspace{}, trust.ErrInvalidState
+	}
+	item.Status, item.RevokedAt = trust.Revoked, revokedAt
+	return item, nil
+}
+
+func (s *SQLite) Resolve(ctx context.Context, deviceID, workspace, actor string) (trust.Resolved, error) {
+	device, err := s.GetDevice(ctx, deviceID)
+	if err != nil {
+		return trust.Resolved{}, err
+	}
+	if device.Status != trust.Active || device.Actor != actor {
+		return trust.Resolved{}, trust.ErrNotFound
+	}
+	item, err := scanWorkspace(s.db.QueryRowContext(ctx, `SELECT id,device_id,workspace,actor,scopes,status,created_at,revoked_at FROM trusted_workspaces WHERE device_id=? AND workspace=? AND actor=? AND status=? ORDER BY created_at DESC LIMIT 1`, deviceID, workspace, actor, trust.Active))
+	if errors.Is(err, sql.ErrNoRows) {
+		return trust.Resolved{}, trust.ErrNotFound
+	}
+	if err != nil {
+		return trust.Resolved{}, err
+	}
+	scopes := trust.IntersectScopes(item.Scopes, device.Scopes)
+	if len(scopes) == 0 {
+		return trust.Resolved{}, trust.ErrNotFound
+	}
+	return trust.Resolved{
+		DeviceID: device.ID, WorkspaceID: item.ID, Workspace: item.Workspace, Actor: actor, Scopes: scopes,
+	}, nil
+}
+
+func scanDevice(scanner grantScanner) (trust.Device, error) {
+	var device trust.Device
+	var scopes []byte
+	err := scanner.Scan(&device.ID, &device.DeviceLabel, &device.Actor, &scopes, &device.Status, &device.CreatedAt, &device.RevokedAt)
+	if err != nil {
+		return trust.Device{}, err
+	}
+	if err := json.Unmarshal(scopes, &device.Scopes); err != nil {
+		return trust.Device{}, fmt.Errorf("decode device scopes: %w", err)
+	}
+	return device, nil
+}
+
+func scanWorkspace(scanner grantScanner) (trust.Workspace, error) {
+	var item trust.Workspace
+	var scopes []byte
+	err := scanner.Scan(&item.ID, &item.DeviceID, &item.Workspace, &item.Actor, &scopes, &item.Status, &item.CreatedAt, &item.RevokedAt)
+	if err != nil {
+		return trust.Workspace{}, err
+	}
+	if err := json.Unmarshal(scopes, &item.Scopes); err != nil {
+		return trust.Workspace{}, fmt.Errorf("decode workspace scopes: %w", err)
+	}
+	return item, nil
 }
 
 func (s *SQLite) Close() error { return s.db.Close() }

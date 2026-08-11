@@ -2,3 +2,6 @@ timewarp.db
 timewarp.db-shm
 timewarp.db-wal
 timewarp.exe
+bin/
+data/
+.timewarp-device-id

@@ -98,9 +98,22 @@ TIMEWARP_DB=./timewarp.db ./timewarp consent approve <grant-id> --ttl 15m
 TIMEWARP_DB=./timewarp.db ./timewarp consent revoke <grant-id>
 ```
 
-The server exposes consent discovery, trace search, redacted trace reads,
-causal inspection, and recorded-only replay manifests. Protected calls require
-a stable session ID and an active, unexpired grant. They are audited under
+For a trusted device and project, create durable trust once instead of
+repeating short grants (defaults: `trace:read` + `checkpoint:read`):
+
+```bash
+TIMEWARP_DB=./timewarp.db ./timewarp trust device --actor cursor
+TIMEWARP_DB=./timewarp.db ./timewarp trust workspace \
+  --workspace /absolute/project --actor cursor
+```
+
+Pass `-workspace` to `timewarp-mcp` so trust can match. Temporary grants remain
+available for one-off scopes such as `payload:read`.
+
+The server exposes consent discovery, durable trust, trace search, redacted
+trace reads, causal inspection, and recorded-only replay manifests. Protected
+calls require a stable session ID plus bootstrap scopes, an active grant, or
+matching device+workspace trust. They are audited under
 `agent-session:<session_id>` together with approval and revocation events.
 Captured headers and bodies remain redacted unless the operator separately
 approves `payload:read`.

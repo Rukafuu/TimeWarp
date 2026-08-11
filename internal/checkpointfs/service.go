@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/timewarp-dev/timewarp/internal/workspacepath"
 	"github.com/timewarp-dev/timewarp/pkg/checkpoint"
 )
 
@@ -58,7 +59,7 @@ func (s Service) Capture(ctx context.Context, request CaptureRequest) (checkpoin
 	if s.Store == nil {
 		return checkpoint.Checkpoint{}, errors.New("checkpoint store is required")
 	}
-	workspace, err := canonicalWorkspace(request.Workspace)
+	workspace, err := workspacepath.Canonical(request.Workspace)
 	if err != nil {
 		return checkpoint.Checkpoint{}, err
 	}
@@ -99,7 +100,7 @@ func (s Service) Plan(ctx context.Context, checkpointID, workspace string) (Reve
 	if err != nil {
 		return RevertPlan{}, err
 	}
-	root, err := canonicalWorkspace(workspace)
+	root, err := workspacepath.Canonical(workspace)
 	if err != nil {
 		return RevertPlan{}, err
 	}
@@ -134,7 +135,7 @@ func (s Service) Revert(ctx context.Context, checkpointID, workspace, actor stri
 	if item.Status != checkpoint.Active {
 		return RevertResult{}, checkpoint.ErrInvalidState
 	}
-	root, err := canonicalWorkspace(workspace)
+	root, err := workspacepath.Canonical(workspace)
 	if err != nil {
 		return RevertResult{}, err
 	}
@@ -304,22 +305,6 @@ func replaceRegularFile(target string, content []byte, mode os.FileMode) error {
 		_ = os.Remove(backup)
 	}
 	return nil
-}
-
-func canonicalWorkspace(path string) (string, error) {
-	absolute, err := filepath.Abs(strings.TrimSpace(path))
-	if err != nil {
-		return "", err
-	}
-	resolved, err := filepath.EvalSymlinks(absolute)
-	if err != nil {
-		return "", fmt.Errorf("resolve workspace: %w", err)
-	}
-	info, err := os.Stat(resolved)
-	if err != nil || !info.IsDir() {
-		return "", errors.New("workspace must be an existing directory")
-	}
-	return filepath.Clean(resolved), nil
 }
 
 func safeTarget(workspace, relativePath string) (string, string, error) {
