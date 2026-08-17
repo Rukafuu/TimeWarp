@@ -45,8 +45,18 @@ and recorded-only replay manifests call the same authorization and auditing
 implementation. The bridge accepts loopback clients only and requires both an
 allowed browser origin and a temporary bearer token generated for that process.
 
-The browser never receives an approval capability. Pending grants must still
-be reviewed and approved through the operator CLI.
+For the automatic browser flow, `timewarp protocol install --db <path>`
+registers a per-user `timewarp://` handler on Windows, Linux, and macOS. Rubber
+Duck supplies a random challenge in the protocol URL. The handler starts the
+loopback bridge or safely hands the challenge to an already-running bridge;
+`GET /v1/pair` consumes that challenge once and returns a rotated bearer token.
+The bridge then opens the ordinary approval CLI in a local terminal after the
+browser creates a pending grant.
+
+The browser never receives an approval capability. It may launch and poll the
+workflow, but the operator must still review the request and type the exact
+grant ID in the Timewarp terminal. Manual URL-and-token pairing remains
+available when custom protocols are unavailable.
 
 ## Consent scopes
 

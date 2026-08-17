@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/timewarp-dev/timewarp/pkg/protocol"
@@ -20,8 +21,10 @@ import (
 const maxBridgeRequestBytes = 64 << 10
 
 type BridgeConfig struct {
-	Token          string
-	AllowedOrigins []string
+	Token              string
+	PairingChallenge   string
+	AllowedOrigins     []string
+	OnConsentRequested func(ConsentOutput) error
 }
 
 func NewPairingToken() (string, error) {
@@ -55,14 +58,21 @@ func NewBridgeHandler(store protocol.EventStore, cfg Config, bridgeCfg BridgeCon
 	if strings.TrimSpace(g.cfg.Actor) == "" {
 		g.cfg.Actor = "rubber-duck"
 	}
-	h := &bridgeHandler{gateway: g, token: bridgeCfg.Token, allowedOrigins: origins}
+	h := &bridgeHandler{
+		gateway: g, token: bridgeCfg.Token, pairingChallenge: bridgeCfg.PairingChallenge,
+		allowedOrigins: origins, onConsentRequested: bridgeCfg.OnConsentRequested,
+	}
 	return h, nil
 }
 
 type bridgeHandler struct {
-	gateway        *gateway
-	token          string
-	allowedOrigins map[string]bool
+	gateway            *gateway
+	mu                 sync.Mutex
+	token              string
+	pairingChallenge   string
+	paired             bool
+	allowedOrigins     map[string]bool
+	onConsentRequested func(ConsentOutput) error
 }
 
 func (h *bridgeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -85,6 +95,14 @@ func (h *bridgeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/pair" {
+		h.pair(w, r)
+		return
+	}
+	if r.Method == http.MethodPost && r.URL.Path == "/v1/internal/pairing-challenge" {
+		h.configurePairing(w, r)
 		return
 	}
 	if !h.authorized(r) {
@@ -119,7 +137,52 @@ func (h *bridgeHandler) requestConsent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, output, err := h.gateway.requestConsent(r.Context(), nil, input)
+	if err == nil && h.onConsentRequested != nil && h.onConsentRequested(output) == nil {
+		output.ApprovalPrompted = true
+	}
 	h.writeGatewayResult(w, output, err)
+}
+
+func (h *bridgeHandler) pair(w http.ResponseWriter, r *http.Request) {
+	challenge := r.URL.Query().Get("challenge")
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.paired || h.pairingChallenge == "" || len(challenge) != len(h.pairingChallenge) || subtle.ConstantTimeCompare([]byte(challenge), []byte(h.pairingChallenge)) != 1 {
+		writeBridgeError(w, http.StatusUnauthorized, "pairing challenge is invalid or expired")
+		return
+	}
+	h.paired = true
+	h.pairingChallenge = ""
+	writeBridgeJSON(w, http.StatusOK, map[string]string{"token": h.token})
+}
+
+func (h *bridgeHandler) configurePairing(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("Origin") != "" || r.Header.Get("X-Timewarp-Protocol-Handler") != "1" {
+		writeBridgeError(w, http.StatusForbidden, "pairing configuration is local-process only")
+		return
+	}
+	var input struct {
+		Challenge string `json:"challenge"`
+		Origin    string `json:"origin"`
+	}
+	if err := decodeBridgeJSON(w, r, &input); err != nil {
+		return
+	}
+	if !h.allowedOrigins[input.Origin] || len(input.Challenge) < 32 || len(input.Challenge) > 256 {
+		writeBridgeError(w, http.StatusBadRequest, "invalid pairing challenge or origin")
+		return
+	}
+	token, err := NewPairingToken()
+	if err != nil {
+		writeBridgeError(w, http.StatusInternalServerError, "could not rotate pairing token")
+		return
+	}
+	h.mu.Lock()
+	h.token = token
+	h.pairingChallenge = input.Challenge
+	h.paired = false
+	h.mu.Unlock()
+	writeBridgeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 func (h *bridgeHandler) searchTraces(w http.ResponseWriter, r *http.Request) {
@@ -170,10 +233,13 @@ func (h *bridgeHandler) traceRoute(w http.ResponseWriter, r *http.Request) {
 
 func (h *bridgeHandler) authorized(r *http.Request) bool {
 	value := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if len(value) != len(h.token) {
+	h.mu.Lock()
+	token := h.token
+	h.mu.Unlock()
+	if len(value) != len(token) {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(value), []byte(h.token)) == 1
+	return subtle.ConstantTimeCompare([]byte(value), []byte(token)) == 1
 }
 
 func (h *bridgeHandler) writeGatewayResult(w http.ResponseWriter, output any, err error) {

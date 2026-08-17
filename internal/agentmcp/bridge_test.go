@@ -33,7 +33,10 @@ func TestBridgeRequiresPairingAndOperatorConsent(t *testing.T) {
 	}
 	handler, err := agentmcp.NewBridgeHandler(store, agentmcp.Config{
 		Actor: "rubber-duck", GrantStore: store, CheckpointStore: store,
-	}, agentmcp.BridgeConfig{Token: testToken, AllowedOrigins: []string{testOrigin}})
+	}, agentmcp.BridgeConfig{
+		Token: testToken, AllowedOrigins: []string{testOrigin},
+		OnConsentRequested: func(agentmcp.ConsentOutput) error { return nil },
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,6 +59,9 @@ func TestBridgeRequiresPairingAndOperatorConsent(t *testing.T) {
 	if requested.Code != http.StatusOK {
 		t.Fatalf("expected consent request, got %d: %s", requested.Code, requested.Body.String())
 	}
+	if !bytes.Contains(requested.Body.Bytes(), []byte(`"approval_prompted":true`)) {
+		t.Fatalf("expected local approval prompt signal: %s", requested.Body.String())
+	}
 	var grant struct{ GrantID string `json:"grant_id"` }
 	if err := json.Unmarshal(requested.Body.Bytes(), &grant); err != nil || grant.GrantID == "" {
 		t.Fatalf("invalid grant response: %v %s", err, requested.Body.String())
@@ -68,6 +74,45 @@ func TestBridgeRequiresPairingAndOperatorConsent(t *testing.T) {
 	allowed := bridgeRequest(t, handler, http.MethodGet, "/v1/traces?session_id=bridge-test", nil, testToken)
 	if allowed.Code != http.StatusOK || !bytes.Contains(allowed.Body.Bytes(), []byte("tw_bridge")) || !bytes.Contains(allowed.Body.Bytes(), []byte(`"Status":"ERROR"`)) {
 		t.Fatalf("expected trace response, got %d: %s", allowed.Code, allowed.Body.String())
+	}
+}
+
+func TestBridgeExchangesAndRotatesOneTimePairingChallenges(t *testing.T) {
+	store, err := storage.OpenSQLite(t.TempDir() + "/timewarp.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	firstChallenge := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	handler, err := agentmcp.NewBridgeHandler(store, agentmcp.Config{GrantStore: store}, agentmcp.BridgeConfig{
+		Token: testToken, PairingChallenge: firstChallenge, AllowedOrigins: []string{testOrigin},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	paired := bridgeRequest(t, handler, http.MethodGet, "/v1/pair?challenge="+firstChallenge, nil, "")
+	if paired.Code != http.StatusOK || !bytes.Contains(paired.Body.Bytes(), []byte(testToken)) {
+		t.Fatalf("expected one-time token, got %d: %s", paired.Code, paired.Body.String())
+	}
+	reused := bridgeRequest(t, handler, http.MethodGet, "/v1/pair?challenge="+firstChallenge, nil, "")
+	if reused.Code != http.StatusUnauthorized {
+		t.Fatalf("expected consumed challenge to fail, got %d", reused.Code)
+	}
+
+	secondChallenge := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	body, _ := json.Marshal(map[string]string{"challenge": secondChallenge, "origin": testOrigin})
+	request := httptest.NewRequest(http.MethodPost, "/v1/internal/pairing-challenge", bytes.NewReader(body))
+	request.RemoteAddr = "127.0.0.1:4321"
+	request.Header.Set("X-Timewarp-Protocol-Handler", "1")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected local challenge rotation, got %d: %s", response.Code, response.Body.String())
+	}
+	rotated := bridgeRequest(t, handler, http.MethodGet, "/v1/pair?challenge="+secondChallenge, nil, "")
+	if rotated.Code != http.StatusOK || bytes.Contains(rotated.Body.Bytes(), []byte(testToken)) {
+		t.Fatalf("expected a rotated token, got %d: %s", rotated.Code, rotated.Body.String())
 	}
 }
 

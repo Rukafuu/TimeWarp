@@ -7,7 +7,9 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +20,8 @@ import (
 	"github.com/timewarp-dev/timewarp/internal/checkpointfs"
 	"github.com/timewarp-dev/timewarp/internal/collector"
 	"github.com/timewarp-dev/timewarp/internal/graph"
+	"github.com/timewarp-dev/timewarp/internal/operatorprompt"
+	"github.com/timewarp-dev/timewarp/internal/protocolhandler"
 	"github.com/timewarp-dev/timewarp/internal/replay"
 	"github.com/timewarp-dev/timewarp/internal/storage"
 	"github.com/timewarp-dev/timewarp/pkg/checkpoint"
@@ -37,6 +41,18 @@ func main() {
 		// Se não encontrar o repositório, continua para comandos que não precisam
 		// mas comandos de skill vão falhar com erro claro
 	}
+	if os.Args[1] == "skill" {
+		skillCmd(repoRoot)
+		return
+	}
+	if os.Args[1] == "protocol" {
+		protocolCmd()
+		return
+	}
+	if os.Args[1] == "handle-url" {
+		handleURLCmd()
+		return
+	}
 
 	dbPath := env("TIMEWARP_DB", "timewarp.db")
 	store, err := storage.OpenSQLite(dbPath)
@@ -46,17 +62,11 @@ func main() {
 	defer store.Close()
 	ctx := context.Background()
 
-	// Verifica se é comando skill antes de usar store
-	if os.Args[1] == "skill" {
-		skillCmd(repoRoot)
-		return
-	}
-
 	switch os.Args[1] {
 	case "serve":
 		serve(store)
 	case "bridge":
-		bridge(store)
+		bridge(store, dbPath)
 	case "traces":
 		traces(ctx, store)
 	case "inspect", "graph":
@@ -291,10 +301,10 @@ func serve(store protocol.EventStore) {
 	log.Fatal(http.ListenAndServe(*addr, c.Routes()))
 }
 
-func bridge(store *storage.SQLite) {
+func bridge(store *storage.SQLite, databasePath string) {
 	fs := flag.NewFlagSet("bridge", flag.ExitOnError)
 	addr := fs.String("addr", "127.0.0.1:7779", "loopback listen address")
-	originsValue := fs.String("origins", "https://rubber-duck.reskyume.chatgpt.site,http://localhost:4200", "comma-separated browser origins")
+	originsValue := fs.String("origins", strings.Join(trustedRubberDuckOrigins(), ","), "comma-separated browser origins")
 	actor := fs.String("actor", "rubber-duck", "audit actor name")
 	token := fs.String("token", os.Getenv("TIMEWARP_BRIDGE_TOKEN"), "pairing token; generated when omitted")
 	fs.Parse(os.Args[2:])
@@ -307,6 +317,7 @@ func bridge(store *storage.SQLite) {
 		Actor: *actor, GrantStore: store, CheckpointStore: store,
 	}, agentmcp.BridgeConfig{
 		Token: *token, AllowedOrigins: strings.Split(*originsValue, ","),
+		OnConsentRequested: approvalPrompt(databasePath),
 	})
 	fatal(err)
 	fmt.Printf("Timewarp bridge: http://%s\nPairing token: %s\n", *addr, *token)
@@ -317,6 +328,112 @@ func bridge(store *storage.SQLite) {
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 	}
 	log.Fatal(server.ListenAndServe())
+}
+
+func protocolCmd() {
+	if len(os.Args) < 3 {
+		protocolUsage()
+		os.Exit(2)
+	}
+	switch os.Args[2] {
+	case "install":
+		fs := flag.NewFlagSet("protocol install", flag.ExitOnError)
+		databasePath := fs.String("db", env("TIMEWARP_DB", "timewarp.db"), "Timewarp SQLite database used by URL launches")
+		fs.Parse(os.Args[3:])
+		status, err := protocolhandler.Install(*databasePath)
+		fatal(err)
+		printJSON(status)
+	case "status":
+		status, err := protocolhandler.CurrentStatus()
+		fatal(err)
+		printJSON(status)
+	case "uninstall":
+		fatal(protocolhandler.Uninstall())
+		fmt.Println("timewarp URL protocol removed")
+	default:
+		protocolUsage()
+		os.Exit(2)
+	}
+}
+
+func handleURLCmd() {
+	fs := flag.NewFlagSet("handle-url", flag.ExitOnError)
+	databasePath := fs.String("db", env("TIMEWARP_DB", "timewarp.db"), "Timewarp SQLite database")
+	addr := fs.String("addr", env("TIMEWARP_BRIDGE_ADDR", "127.0.0.1:7779"), "loopback bridge address")
+	fs.Parse(os.Args[2:])
+	if fs.NArg() != 1 {
+		log.Fatal("timewarp URL is required")
+	}
+	pairingURL, err := url.Parse(fs.Arg(0))
+	fatal(err)
+	if pairingURL.Scheme != protocolhandler.Scheme || pairingURL.Host != "pair" {
+		log.Fatal("unsupported timewarp URL")
+	}
+	origin := pairingURL.Query().Get("origin")
+	challenge := pairingURL.Query().Get("challenge")
+	if !trustedRubberDuckOrigin(origin) || len(challenge) < 32 || len(challenge) > 256 {
+		log.Fatal("untrusted origin or invalid pairing challenge")
+	}
+	store, err := storage.OpenSQLite(*databasePath)
+	fatal(err)
+	defer store.Close()
+	token, err := agentmcp.NewPairingToken()
+	fatal(err)
+	handler, err := agentmcp.NewBridgeHandler(store, agentmcp.Config{
+		Actor: "rubber-duck", GrantStore: store, CheckpointStore: store,
+	}, agentmcp.BridgeConfig{
+		Token: token, PairingChallenge: challenge, AllowedOrigins: trustedRubberDuckOrigins(),
+		OnConsentRequested: approvalPrompt(*databasePath),
+	})
+	fatal(err)
+	listener, listenErr := net.Listen("tcp", *addr)
+	if listenErr != nil {
+		registerErr := agentmcp.RegisterPairingChallenge(context.Background(), "http://"+*addr, challenge, origin)
+		if registerErr == nil {
+			return
+		}
+		log.Fatalf("start bridge: %v; notify existing bridge: %v", listenErr, registerErr)
+	}
+	defer listener.Close()
+	server := &http.Server{
+		Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
+		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
+	}
+	log.Printf("timewarp URL bridge listening on %s", *addr)
+	log.Fatal(server.Serve(listener))
+}
+
+func approvalPrompt(databasePath string) func(agentmcp.ConsentOutput) error {
+	return func(output agentmcp.ConsentOutput) error {
+		executable, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		return operatorprompt.Open(executable, output.GrantID, databasePath)
+	}
+}
+
+func trustedRubberDuckOrigin(origin string) bool {
+	for _, allowed := range trustedRubberDuckOrigins() {
+		if origin == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func trustedRubberDuckOrigins() []string {
+	return []string{
+		"https://rubber-duck.reskyume.chatgpt.site",
+		"http://localhost:3000",
+		"http://127.0.0.1:3000",
+		"http://localhost:4200",
+		"http://127.0.0.1:4200",
+	}
+}
+
+func protocolUsage() {
+	fmt.Fprintln(os.Stderr, "usage: timewarp protocol <install|status|uninstall> [arguments]")
 }
 func traces(ctx context.Context, store protocol.EventStore) {
 	items, err := store.Search(ctx, protocol.TraceFilter{Limit: 50})
@@ -362,7 +479,7 @@ func env(k, d string) string {
 	return d
 }
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: timewarp <serve|bridge|traces|inspect|graph|replay|consent|checkpoint|skill> [arguments]")
+	fmt.Fprintln(os.Stderr, "usage: timewarp <serve|bridge|handle-url|protocol|traces|inspect|graph|replay|consent|checkpoint|skill> [arguments]")
 }
 
 // findRepoRoot tenta encontrar o diretório raiz do repositório a partir do binário.

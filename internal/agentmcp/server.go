@@ -81,6 +81,7 @@ type ConsentOutput struct {
 	Reason          string   `json:"reason"`
 	OperatorAction  string   `json:"operator_action"`
 	AuditTraceID    string   `json:"audit_trace_id"`
+	ApprovalPrompted bool    `json:"approval_prompted,omitempty"`
 }
 
 type SearchInput struct {

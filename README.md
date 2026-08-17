@@ -46,16 +46,37 @@ safety rules, and the incremental roadmap.
 ## Local browser bridge
 
 Timewarp can expose its read-only, consent-gated investigation interface to the
-Rubber Duck web app through a loopback-only bridge:
+Rubber Duck web app through a loopback-only bridge. After building the CLI,
+register its URL protocol once:
+
+```bash
+./timewarp protocol install --db ./timewarp.db
+```
+
+The same command installs a per-user `timewarp://` handler on Windows, Linux,
+and macOS. Rubber Duck's **Connect and request access** button then launches the
+handler, starts or reuses the bridge, exchanges a one-time random challenge for
+a temporary bearer token, and requests the minimum `trace:read` scope. Timewarp
+opens the approval command in a local terminal; the operator must still review
+the scope, reason, TTL, and type the exact grant ID.
+
+Inspect or remove the registration with:
+
+```bash
+./timewarp protocol status
+./timewarp protocol uninstall
+```
+
+If the executable or database moves, run `protocol install` again. The manual
+flow remains available:
 
 ```bash
 ./timewarp bridge
 ```
 
 The command prints a temporary pairing token that is valid only while the
-process is running. Enter the local URL and token in Rubber Duck, request the
-minimum `trace:read` scope, then approve the pending grant from a separate
-terminal:
+process is running. Enter the local URL and token in Rubber Duck, request
+`trace:read`, then approve the pending grant from a separate terminal:
 
 ```bash
 ./timewarp consent list --status PENDING
