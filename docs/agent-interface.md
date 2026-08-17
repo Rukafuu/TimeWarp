@@ -36,6 +36,18 @@ codex mcp add timewarp \
 
 Other MCP hosts can use the same executable as a stdio server.
 
+## Rubber Duck browser bridge
+
+The optional `timewarp bridge` command adapts the same gateway to a small local
+HTTP API for the Rubber Duck web interface. It does not bypass MCP's consent
+model: capabilities, consent requests, redacted trace reads, causal inspection,
+and recorded-only replay manifests call the same authorization and auditing
+implementation. The bridge accepts loopback clients only and requires both an
+allowed browser origin and a temporary bearer token generated for that process.
+
+The browser never receives an approval capability. Pending grants must still
+be reviewed and approved through the operator CLI.
+
 ## Consent scopes
 
 | Scope | Permits |

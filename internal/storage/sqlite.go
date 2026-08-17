@@ -384,7 +384,7 @@ func (s *SQLite) Search(ctx context.Context, f protocol.TraceFilter) ([]protocol
 		args = append(args, f.Since.UnixMilli())
 	}
 	args = append(args, limit)
-	q := `SELECT trace_id, MIN(timestamp), MAX(timestamp+duration_ms), COUNT(*), MIN(service), MAX(CASE WHEN type IN ('ERROR','TIMEOUT') THEN 1 ELSE 0 END) FROM events ` + where + ` GROUP BY trace_id ORDER BY MIN(timestamp) DESC LIMIT ?`
+	q := `SELECT trace_id, MIN(timestamp), MAX(timestamp+duration_ms), COUNT(*), MIN(service), MAX(CASE WHEN type IN ('ERROR','TIMEOUT') OR COALESCE(json_extract(http,'$.status_code'),0)>=400 THEN 1 ELSE 0 END) FROM events ` + where + ` GROUP BY trace_id ORDER BY MIN(timestamp) DESC LIMIT ?`
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err

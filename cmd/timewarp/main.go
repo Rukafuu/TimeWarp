@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/timewarp-dev/timewarp/cmd/timewarp/skill"
+	"github.com/timewarp-dev/timewarp/internal/agentmcp"
 	"github.com/timewarp-dev/timewarp/internal/checkpointfs"
 	"github.com/timewarp-dev/timewarp/internal/collector"
 	"github.com/timewarp-dev/timewarp/internal/graph"
@@ -21,7 +23,6 @@ import (
 	"github.com/timewarp-dev/timewarp/pkg/checkpoint"
 	"github.com/timewarp-dev/timewarp/pkg/consent"
 	"github.com/timewarp-dev/timewarp/pkg/protocol"
-	"github.com/timewarp-dev/timewarp/cmd/timewarp/skill"
 )
 
 func main() {
@@ -54,6 +55,8 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		serve(store)
+	case "bridge":
+		bridge(store)
 	case "traces":
 		traces(ctx, store)
 	case "inspect", "graph":
@@ -287,6 +290,34 @@ func serve(store protocol.EventStore) {
 	log.Printf("timewarp listening on %s", *addr)
 	log.Fatal(http.ListenAndServe(*addr, c.Routes()))
 }
+
+func bridge(store *storage.SQLite) {
+	fs := flag.NewFlagSet("bridge", flag.ExitOnError)
+	addr := fs.String("addr", "127.0.0.1:7779", "loopback listen address")
+	originsValue := fs.String("origins", "https://rubber-duck.reskyume.chatgpt.site,http://localhost:4200", "comma-separated browser origins")
+	actor := fs.String("actor", "rubber-duck", "audit actor name")
+	token := fs.String("token", os.Getenv("TIMEWARP_BRIDGE_TOKEN"), "pairing token; generated when omitted")
+	fs.Parse(os.Args[2:])
+	if strings.TrimSpace(*token) == "" {
+		generated, err := agentmcp.NewPairingToken()
+		fatal(err)
+		*token = generated
+	}
+	handler, err := agentmcp.NewBridgeHandler(store, agentmcp.Config{
+		Actor: *actor, GrantStore: store, CheckpointStore: store,
+	}, agentmcp.BridgeConfig{
+		Token: *token, AllowedOrigins: strings.Split(*originsValue, ","),
+	})
+	fatal(err)
+	fmt.Printf("Timewarp bridge: http://%s\nPairing token: %s\n", *addr, *token)
+	fmt.Println("The token is valid only while this bridge process is running.")
+	server := &http.Server{
+		Addr: *addr, Handler: handler,
+		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
+		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
+	}
+	log.Fatal(server.ListenAndServe())
+}
 func traces(ctx context.Context, store protocol.EventStore) {
 	items, err := store.Search(ctx, protocol.TraceFilter{Limit: 50})
 	fatal(err)
@@ -331,7 +362,7 @@ func env(k, d string) string {
 	return d
 }
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: timewarp <serve|traces|inspect|graph|replay|consent|checkpoint|skill> [arguments]")
+	fmt.Fprintln(os.Stderr, "usage: timewarp <serve|bridge|traces|inspect|graph|replay|consent|checkpoint|skill> [arguments]")
 }
 
 // findRepoRoot tenta encontrar o diretório raiz do repositório a partir do binário.

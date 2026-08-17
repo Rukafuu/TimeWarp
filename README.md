@@ -43,6 +43,31 @@ curl -X POST http://localhost:7778 -H 'X-Timewarp-Original-URL: https://pay.test
 See [the MVP architecture](docs/architecture.md) for boundaries, protocol,
 safety rules, and the incremental roadmap.
 
+## Local browser bridge
+
+Timewarp can expose its read-only, consent-gated investigation interface to the
+Rubber Duck web app through a loopback-only bridge:
+
+```bash
+./timewarp bridge
+```
+
+The command prints a temporary pairing token that is valid only while the
+process is running. Enter the local URL and token in Rubber Duck, request the
+minimum `trace:read` scope, then approve the pending grant from a separate
+terminal:
+
+```bash
+./timewarp consent list --status PENDING
+./timewarp consent approve <grant-id> --ttl 15m
+```
+
+The bridge delegates authorization and audit logging to the same gateway used
+by MCP. It binds to `127.0.0.1:7779` by default, restricts browser origins,
+redacts captured payloads unless separately approved, and exposes no mutation
+or replay-execution endpoint. Use `--origins` to replace the default Rubber
+Duck production and local-development origins.
+
 ## End-to-end demo
 
 Start the collector and the demo services in separate terminals:

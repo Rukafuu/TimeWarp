@@ -13,6 +13,8 @@ The MVP proves one vertical slice: **record -> reconstruct -> replay**.
 - `internal/graph` deterministically reconstructs and diagnoses causal graphs.
 - `internal/replay` builds a safe manifest and serves recorded HTTP responses.
 - `internal/agentmcp` exposes scoped, audited, payload-minimizing MCP tools.
+- `internal/agentmcp` also adapts that same gateway to an authenticated,
+  loopback-only browser bridge without adding new authorization semantics.
 - `internal/checkpointfs` captures explicit regular files and applies compensated reversals.
 - `cmd/timewarp-mcp` is the universal stdio composition root for MCP clients.
 - `cmd/timewarp` is the composition root and CLI.
