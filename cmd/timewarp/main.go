@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/timewarp-dev/timewarp/pkg/checkpoint"
 	"github.com/timewarp-dev/timewarp/pkg/consent"
 	"github.com/timewarp-dev/timewarp/pkg/protocol"
+	"github.com/timewarp-dev/timewarp/cmd/timewarp/skill"
 )
 
 func main() {
@@ -27,6 +29,14 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+
+	// Determina o caminho raiz do repositório a partir do binário
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		// Se não encontrar o repositório, continua para comandos que não precisam
+		// mas comandos de skill vão falhar com erro claro
+	}
+
 	dbPath := env("TIMEWARP_DB", "timewarp.db")
 	store, err := storage.OpenSQLite(dbPath)
 	if err != nil {
@@ -34,6 +44,13 @@ func main() {
 	}
 	defer store.Close()
 	ctx := context.Background()
+
+	// Verifica se é comando skill antes de usar store
+	if os.Args[1] == "skill" {
+		skillCmd(repoRoot)
+		return
+	}
+
 	switch os.Args[1] {
 	case "serve":
 		serve(store)
@@ -314,5 +331,145 @@ func env(k, d string) string {
 	return d
 }
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: timewarp <serve|traces|inspect|graph|replay|consent|checkpoint> [arguments]")
+	fmt.Fprintln(os.Stderr, "usage: timewarp <serve|traces|inspect|graph|replay|consent|checkpoint|skill> [arguments]")
+}
+
+// findRepoRoot tenta encontrar o diretório raiz do repositório a partir do binário.
+// Procura pelo diretório skills/debug-with-timewarp em locais comuns.
+func findRepoRoot() (string, error) {
+	// Tenta obter o caminho do executável
+	execPath, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("failed to get executable path: %w", err)
+	}
+
+	// Começa do diretório do executável e sobe na hierarquia
+	dir := filepath.Dir(execPath)
+	for i := 0; i < 10; i++ { // Limite de níveis para subir
+		skillPath := filepath.Join(dir, "skills", "debug-with-timewarp")
+		if _, err := os.Stat(skillPath); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break // Chegou na raiz
+		}
+		dir = parent
+	}
+
+	// Se não encontrou, tenta o diretório atual
+	cwd, err := os.Getwd()
+	if err == nil {
+		skillPath := filepath.Join(cwd, "skills", "debug-with-timewarp")
+		if _, err := os.Stat(skillPath); err == nil {
+			return cwd, nil
+		}
+	}
+
+	return "", fmt.Errorf("could not find repository root with skills/debug-with-timewarp")
+}
+
+// skillCmd implementa o subcomando skill.
+func skillCmd(repoRoot string) {
+	if len(os.Args) < 3 {
+		skillUsage()
+		os.Exit(2)
+	}
+
+	installer := skill.NewSkillInstaller(repoRoot)
+
+	switch os.Args[2] {
+	case "install":
+		skillInstallCmd(installer, os.Args[3:])
+	case "status":
+		skillStatusCmd(installer)
+	default:
+		skillUsage()
+		os.Exit(2)
+	}
+}
+
+func skillInstallCmd(installer *skill.SkillInstaller, args []string) {
+	fs := flag.NewFlagSet("skill install", flag.ExitOnError)
+	targetStr := fs.String("target", "", "target platform: codex, claude, cursor, or all")
+	force := fs.Bool("force", false, "overwrite existing skill installation")
+	fs.Parse(args)
+
+	if *targetStr == "" {
+		log.Fatal("target is required; use --target codex|claude|cursor|all")
+	}
+
+	target, err := skill.ParseTarget(*targetStr)
+	if err != nil {
+		log.Fatalf("invalid target %q: use codex, claude, cursor, or all", *targetStr)
+	}
+
+	opts := skill.InstallOptions{
+		Target: target,
+		Force:  *force,
+	}
+
+	if err := installer.Install(opts); err != nil {
+		if err == skill.ErrSkillExists {
+			log.Fatalf("%v", err)
+		}
+		if err == skill.ErrSkillNotFound {
+			log.Fatalf("canonical skill not found; ensure you are running from the repository root or provide the correct path")
+		}
+		log.Fatal(err)
+	}
+
+	// Mensagem de sucesso com readback confirmado
+	targets := []skill.Target{target}
+	if target == skill.TargetAll {
+		targets = skill.GetAllTargets()
+	}
+
+	for _, t := range targets {
+		targetDir, _ := skill.GetTargetDir(t, "")
+		fmt.Printf("✓ installed debug-with-timewarp to %s\n", filepath.Join(targetDir, "debug-with-timewarp"))
+	}
+	fmt.Println("Readback confirmed: SKILL.md exists in all installed locations.")
+}
+
+func skillStatusCmd(installer *skill.SkillInstaller) {
+	results, err := installer.Status(skill.GetAllTargets())
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("%-12s %-50s %-10s %s\n", "TARGET", "PATH", "STATUS", "DIVERGENT")
+	fmt.Println(strings.Repeat("-", 90))
+
+	for _, r := range results {
+		status := "absent"
+		if r.Installed {
+			status = "installed"
+		}
+		divergent := ""
+		if r.Divergent {
+			divergent = "YES - run install --force to update"
+		} else if r.Installed {
+			divergent = "no"
+		}
+		fmt.Printf("%-12s %-50s %-10s %s\n", r.Target, r.ExpectedPath, status, divergent)
+	}
+}
+
+func skillUsage() {
+	fmt.Fprintln(os.Stderr, "usage: timewarp skill <install|status> [options]")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Commands:")
+	fmt.Fprintln(os.Stderr, "  install    Install the debug-with-timewarp skill to agent directories")
+	fmt.Fprintln(os.Stderr, "  status     Show installation status for all supported agents")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Install options:")
+	fmt.Fprintln(os.Stderr, "  --target   Target platform: codex, claude, cursor, or all")
+	fmt.Fprintln(os.Stderr, "  --force    Overwrite existing installation")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Examples:")
+	fmt.Fprintln(os.Stderr, "  timewarp skill install --target codex")
+	fmt.Fprintln(os.Stderr, "  timewarp skill install --target claude --force")
+	fmt.Fprintln(os.Stderr, "  timewarp skill install --target all")
+	fmt.Fprintln(os.Stderr, "  timewarp skill status")
 }
