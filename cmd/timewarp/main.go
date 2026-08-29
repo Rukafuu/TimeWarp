@@ -55,13 +55,20 @@ func main() {
 	case "serve":
 		serve(store)
 	case "traces":
-		traces(ctx, store)
+		traces(ctx, store, os.Args[2:])
 	case "inspect", "graph":
 		needTrace()
 		events, err := store.GetTrace(ctx, os.Args[2])
 		fatal(err)
 		if len(events) == 0 {
 			log.Fatal("trace not found")
+		}
+		fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
+		jsonOutput := fs.Bool("json", false, "print trace events as JSON")
+		fs.Parse(os.Args[3:])
+		if *jsonOutput {
+			printJSON(events)
+			break
 		}
 		g := graph.Build(events)
 		fmt.Print(graph.ASCII(g))
@@ -287,9 +294,18 @@ func serve(store protocol.EventStore) {
 	log.Printf("timewarp listening on %s", *addr)
 	log.Fatal(http.ListenAndServe(*addr, c.Routes()))
 }
-func traces(ctx context.Context, store protocol.EventStore) {
-	items, err := store.Search(ctx, protocol.TraceFilter{Limit: 50})
+func traces(ctx context.Context, store protocol.EventStore, args []string) {
+	fs := flag.NewFlagSet("traces", flag.ExitOnError)
+	limit := fs.Int("limit", 50, "maximum traces")
+	service := fs.String("service", "", "filter by service")
+	jsonOutput := fs.Bool("json", false, "print traces as JSON")
+	fs.Parse(args)
+	items, err := store.Search(ctx, protocol.TraceFilter{Limit: *limit, Service: *service})
 	fatal(err)
+	if *jsonOutput {
+		printJSON(items)
+		return
+	}
 	fmt.Printf("%-22s %-22s %-8s %s\n", "TRACE", "SERVICE", "STATUS", "DURATION")
 	for _, t := range items {
 		fmt.Printf("%-22s %-22s %-8s %dms\n", t.TraceID, t.RootService, t.Status, t.DurationMS)

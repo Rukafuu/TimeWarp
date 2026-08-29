@@ -115,6 +115,23 @@ See [the universal agent interface](docs/agent-interface.md) for tools, scopes,
 client setup, audit behavior, and the reversibility boundary. The reusable
 agent workflow is versioned at `skills/debug-with-timewarp`.
 
+## Editor extension
+
+The first-party extension in [`extensions/vscode`](extensions/vscode) adds a
+TimeWarp activity-bar view to VS Code-compatible editors such as Cursor. It
+lists local traces, opens an event timeline, and starts or stops the collector
+while sharing the same SQLite database with the CLI and MCP server.
+
+The extension calls the stable JSON CLI surface:
+
+```bash
+timewarp traces --json --limit 100
+timewarp inspect <trace-id> --json
+```
+
+See the [extension development guide](extensions/vscode/README.md) to run it
+locally.
+
 For the proposed AI-agent gateway deployment model, see the
 [Ghostwire architecture and readiness plan](docs/ghostwire.md). Ghostwire is
 currently a design proposal, not a runnable gateway.
