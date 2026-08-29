@@ -1,0 +1,33 @@
+{
+  "name": "timewarp",
+  "displayName": "TimeWarp",
+  "description": "Explore and replay local TimeWarp traces without leaving your editor.",
+  "version": "0.1.0",
+  "publisher": "timewarp-dev",
+  "license": "MIT",
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Debuggers", "Visualization"],
+  "activationEvents": ["onView:timewarp.traces"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "timewarp.refresh", "title": "TimeWarp: Refresh Traces", "icon": "$(refresh)" },
+      { "command": "timewarp.startCollector", "title": "TimeWarp: Start Collector" },
+      { "command": "timewarp.stopCollector", "title": "TimeWarp: Stop Collector" },
+      { "command": "timewarp.openTrace", "title": "TimeWarp: Open Trace" }
+    ],
+    "viewsContainers": { "activitybar": [{ "id": "timewarp", "title": "TimeWarp", "icon": "media/timewarp.svg" }] },
+    "views": { "timewarp": [{ "id": "timewarp.traces", "name": "Traces" }] },
+    "menus": { "view/title": [{ "command": "timewarp.refresh", "when": "view == timewarp.traces", "group": "navigation" }] },
+    "configuration": {
+      "title": "TimeWarp",
+      "properties": {
+        "timewarp.binaryPath": { "type": "string", "default": "timewarp", "description": "Path to the TimeWarp executable." },
+        "timewarp.databasePath": { "type": "string", "default": "${workspaceFolder}/timewarp.db", "description": "SQLite database shared with the collector and MCP server." },
+        "timewarp.collectorAddress": { "type": "string", "default": ":7777", "description": "Collector listen address." }
+      }
+    }
+  },
+  "scripts": { "compile": "tsc -p ./", "watch": "tsc -watch -p ./", "check": "tsc --noEmit -p ./" },
+  "devDependencies": { "@types/node": "^22.0.0", "@types/vscode": "^1.90.0", "typescript": "^5.5.0" }
+}
