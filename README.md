@@ -135,3 +135,7 @@ locally.
 For the proposed AI-agent gateway deployment model, see the
 [Ghostwire architecture and readiness plan](docs/ghostwire.md). Ghostwire is
 currently a design proposal, not a runnable gateway.
+
+## License
+
+TimeWarp is licensed under the [Apache License 2.0](LICENSE).
